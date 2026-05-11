@@ -5,10 +5,12 @@ Enter the ingredients you have at home and discover
 what you can cook — with quantities, nutrition info,
 allergen warnings, serving scaler and more.
 
-APIs (all free):
-━━━━━━━━━━━━━━━━
-1. TheMealDB   → recipes, ingredients + quantities, instructions, photos
-   https://www.themealdb.com/api/json/v1/1/  (no key needed)
+APIs (all free, no keys):
+━━━━━━━━━━━━━━━━━━━━━━
+1. TheMealDB → recipes by ingredient, quantities, instructions, photos
+   https://www.themealdb.com/api/json/v1/1/
+2. Forkify   → extra recipe pool (search + ingredient lists; full steps on
+   source link) https://forkify-api.jonas.io/api/v2/recipes
 
 
 Allergen detection:
@@ -53,38 +55,119 @@ st.set_page_config(
     layout="wide"
 )
 
-st.markdown("""
+st.markdown(
+    """
 <style>
+    /* App shell: white page, green accents, readable body text */
+    .stApp {
+        background: #ffffff;
+    }
+    [data-testid="stAppViewContainer"] > .main {
+        background: #ffffff;
+        color: #1b4332;
+    }
+    [data-testid="stHeader"] {
+        background: rgba(255,255,255,0.92);
+        border-bottom: 1px solid #b7e4c7;
+    }
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(185deg, #f8fdf9 0%, #ffffff 55%);
+        border-right: 2px solid #95d5b2;
+    }
+    section[data-testid="stSidebar"] * {
+        color: #1b4332;
+    }
+    h1, h2, h3 {
+        color: #1b4332 !important;
+        font-weight: 700 !important;
+    }
+    .block-container {
+        padding-top: 1.25rem;
+        max-width: 1200px;
+    }
+    div[data-testid="stExpander"] details summary {
+        color: #1b4332;
+        font-weight: 600;
+    }
+    [data-testid="stMetricValue"] {
+        color: #2d6a4f !important;
+    }
+    [data-testid="stMetricLabel"] {
+        color: #40916c !important;
+    }
+    .stButton > button[kind="primary"] {
+        background-color: #2d6a4f !important;
+        border: 1px solid #1b4332 !important;
+        color: #ffffff !important;
+    }
+    .stButton > button[kind="primary"]:hover {
+        background-color: #40916c !important;
+        border-color: #2d6a4f !important;
+        color: #ffffff !important;
+    }
+    /* Hero band */
+    .cookbook-hero {
+        background: linear-gradient(90deg, #d8f3dc 0%, #ffffff 100%);
+        border: 2px solid #52b788;
+        border-radius: 14px;
+        padding: 1rem 1.25rem;
+        margin-bottom: 1rem;
+    }
+    .cookbook-hero p {
+        color: #1b4332;
+        margin: 0;
+    }
+    /* Ingredient / allergen chips: strong contrast on white */
     .ingredient-tag {
         display: inline-block;
-        background: #e8f5e9;
-        border: 1px solid #81c784;
+        background: #d8f3dc;
+        border: 1px solid #2d6a4f;
+        color: #1b4332;
         border-radius: 20px;
-        padding: 2px 10px;
+        padding: 3px 11px;
         margin: 2px;
-        font-size: 0.85rem;
+        font-size: 0.88rem;
+        font-weight: 500;
     }
     .missing-tag {
         display: inline-block;
-        background: #fce4ec;
-        border: 1px solid #e57373;
+        background: #ffe4e6;
+        border: 1px solid #c9184a;
+        color: #590d22;
         border-radius: 20px;
-        padding: 2px 10px;
+        padding: 3px 11px;
         margin: 2px;
-        font-size: 0.85rem;
+        font-size: 0.88rem;
+        font-weight: 500;
     }
     .allergen-tag {
         display: inline-block;
         background: #fff3e0;
-        border: 1px solid #ff9800;
+        border: 1px solid #e65100;
+        color: #5c2800;
         border-radius: 20px;
-        padding: 2px 10px;
+        padding: 3px 11px;
         margin: 2px;
-        font-size: 0.85rem;
-        font-weight: bold;
+        font-size: 0.88rem;
+        font-weight: 700;
+    }
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 6px;
+        background-color: #f4fbf6;
+        border-radius: 10px;
+        padding: 6px;
+        border: 1px solid #b7e4c7;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #2d6a4f !important;
+        color: #ffffff !important;
+        border-radius: 8px;
     }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # ─────────────────────────────────────────────
 # EU 14 MANDATORY ALLERGENS
@@ -606,6 +689,159 @@ def api_get_categories():
 
 
 # ─────────────────────────────────────────────
+# FORKIFY API (second source — search + ingredient list, no API key)
+# https://forkify-api.jonas.io — complements TheMealDB with more hits.
+# ─────────────────────────────────────────────
+
+FORKIFY_BASE = "https://forkify-api.jonas.io/api/v2/recipes"
+
+
+@st.cache_data(ttl=86400)
+def forkify_search(query: str):
+    """Return preview dicts: id, title, publisher, image_url."""
+    q = (query or "").strip()
+    if len(q) < 2:
+        return []
+    try:
+        r = requests.get(
+            FORKIFY_BASE, params={"search": q}, timeout=14)
+        data = r.json()
+        if data.get("status") != "success":
+            return []
+        return data.get("data", {}).get("recipes") or []
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=86400)
+def forkify_recipe_detail(recipe_id: str):
+    """Full recipe payload for one id (ingredients, image, source URL)."""
+    if not recipe_id:
+        return None
+    try:
+        r = requests.get(f"{FORKIFY_BASE}/{recipe_id}", timeout=14)
+        data = r.json()
+        if data.get("status") != "success":
+            return None
+        return data.get("data", {}).get("recipe")
+    except Exception:
+        return None
+
+
+def infer_cuisine_from_title(title: str, publisher: str = "") -> str:
+    """
+    Forkify has no cuisine field; infer a coarse area for filter compatibility.
+    """
+    blob = f"{title} {publisher}".lower()
+    rules = [
+        ("Italian", ("italian", "pasta", "pesto", "risotto", "minestrone", "carbonara")),
+        ("French", ("french", "ratatouille", "quiche", "coq au", "crepe", "gratin")),
+        ("Spanish", ("spanish", "paella", "tapas", " gazpacho", "chorizo")),
+        ("Swiss", ("swiss", "fondue", "raclette", "roesti", "rösti")),
+        ("Mexican", ("mexican", "taco", "burrito", "enchilada", "quesadilla")),
+        ("Mediterranean", ("mediterranean", "greek", "falafel", "hummus", "tzatziki")),
+        (
+            "Asian",
+            ("thai", "chinese", "japanese", "korean", "vietnamese", "curry", "ramen",
+             "stir fry", "teriyaki", "miso", "satay", "pad thai"),
+        ),
+        ("British", ("british", "shepherd", "bangers", "yorkshire", "scone")),
+        ("American", ("american", "bbq", "burger", "cajun", "tex-mex", "mac and cheese")),
+    ]
+    for area, keys in rules:
+        if any(k in blob for k in keys):
+            return area
+    return "International"
+
+
+def forkify_detail_to_recipe(rec: dict) -> dict:
+    """Map Forkify detail JSON to the same shape TheMealDB recipes use in-app."""
+    ings: list[str] = []
+    msrs: list[str] = []
+    for it in rec.get("ingredients") or []:
+        desc = (it.get("description") or "").strip()
+        if not desc:
+            continue
+        qty, unit = it.get("quantity"), (it.get("unit") or "").strip()
+        parts = []
+        if qty is not None and str(qty).strip() != "":
+            parts.append(str(qty).strip())
+        if unit:
+            parts.append(unit)
+        msr = " ".join(parts) if parts else "as needed"
+        ings.append(desc.lower())
+        msrs.append(msr)
+
+    title = rec.get("title") or "Recipe"
+    src = (rec.get("source_url") or "").strip()
+    cook = rec.get("cooking_time")
+    lines = [
+        "Forkify provides ingredient quantities here.",
+        "Open the original article for full cooking steps.",
+    ]
+    if src:
+        lines.append(f"Source: {src}")
+    lines.append("— Ingredient list —")
+    for i, ing in enumerate(ings, 1):
+        m = msrs[i - 1] if i - 1 < len(msrs) else ""
+        lines.append(f"{i}. {m} — {ing}".strip())
+    instructions = "\n".join(lines)
+
+    publisher = rec.get("publisher") or ""
+    area = infer_cuisine_from_title(title, publisher)
+
+    return {
+        "source": "forkify",
+        "id": rec["id"],
+        "name": title,
+        "category": "Web",
+        "area": area,
+        "instructions": instructions,
+        "image": (rec.get("image_url") or "").strip(),
+        "tags": f"forkify,{publisher}".lower(),
+        "ingredients": ings,
+        "measures": msrs,
+        "youtube": "",
+        "difficulty": "Medium",
+        "time_mins": int(cook) if cook is not None else None,
+        "source_url": src,
+    }
+
+
+def fetch_forkify_for_ingredients(user_ingredients, max_detail: int = 20):
+    """
+    Search Forkify per user ingredient, fetch details for unique ids (capped).
+    """
+    seen_preview: set[str] = set()
+    id_order: list[str] = []
+    for ing in user_ingredients[:5]:
+        for item in forkify_search(ing)[:8]:
+            rid = item.get("id")
+            if not rid or rid in seen_preview:
+                continue
+            seen_preview.add(rid)
+            id_order.append(rid)
+            if len(id_order) >= 28:
+                break
+        if len(id_order) >= 28:
+            break
+
+    out: list[dict] = []
+    seen_done: set[str] = set()
+    for rid in id_order:
+        if len(out) >= max_detail:
+            break
+        if rid in seen_done:
+            continue
+        detail = forkify_recipe_detail(rid)
+        if not detail:
+            continue
+        seen_done.add(rid)
+        out.append(forkify_detail_to_recipe(detail))
+    return out
+
+
+# ─────────────────────────────────────────────
 # ALLERGEN DETECTION
 # Rule-based scan of ingredient names against
 # EU 14 mandatory allergen keyword list.
@@ -632,11 +868,12 @@ def detect_allergens(ingredients):
 # RECIPE FETCHING AND MATCHING
 # ─────────────────────────────────────────────
 
-def fetch_recipes_for_ingredients(user_ingredients):
+def fetch_recipes_for_ingredients(
+        user_ingredients, include_forkify: bool = True):
     """
-    For each ingredient, fetch matching meals from TheMealDB.
-    Look up full details. Cache in SQLite.
-    Returns list of recipe dicts with ingredients + measures.
+    For each ingredient, fetch meals from TheMealDB (cache in SQLite).
+    Optionally merge Forkify search results for a larger recipe pool.
+    Returns unified list of recipe dicts with ingredients + measures.
     """
     seen_ids = set()
     full_meals = []
@@ -695,6 +932,8 @@ def fetch_recipes_for_ingredients(user_ingredients):
                         "youtube": meal.get("strYoutube",""),
                         "difficulty": "Medium", "time_mins": None,
                     })
+    if include_forkify:
+        full_meals.extend(fetch_forkify_for_ingredients(user_ingredients))
     return full_meals
 
 
@@ -903,6 +1142,26 @@ def recommend_by_knn(favourites_names, all_recipes,
 # VISUALIZATIONS
 # ─────────────────────────────────────────────
 
+def _chart_theme(fig):
+    """White / soft-mint plot surfaces to match the green-on-white UI."""
+    fig.update_layout(
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#f8fdf9",
+        font=dict(color="#1b4332"),
+        title_font=dict(color="#1b4332", size=15),
+        legend_font=dict(color="#1b4332"),
+    )
+    fig.update_xaxes(
+        gridcolor="#d8f3dc", linecolor="#52b788",
+        tickfont=dict(color="#1b4332"),
+    )
+    fig.update_yaxes(
+        gridcolor="#d8f3dc", linecolor="#52b788",
+        tickfont=dict(color="#1b4332"),
+    )
+    return fig
+
+
 def plot_coverage_bar(results):
     top = results[:15]
     colors = ["#1D9E75" if c["coverage"] >= 80
@@ -923,7 +1182,7 @@ def plot_coverage_bar(results):
         margin=dict(l=10,r=10,t=40,b=10),
         yaxis=dict(autorange="reversed")
     )
-    return fig
+    return _chart_theme(fig)
 
 
 
@@ -941,7 +1200,7 @@ def plot_category_donut(results):
         color_discrete_sequence=px.colors.qualitative.Set3
     )
     fig.update_layout(height=300, margin=dict(l=10,r=10,t=40,b=10))
-    return fig
+    return _chart_theme(fig)
 
 
 def plot_missing_bar(results):
@@ -966,7 +1225,7 @@ def plot_missing_bar(results):
         margin=dict(l=10,r=10,t=40,b=10),
         yaxis=dict(autorange="reversed")
     )
-    return fig
+    return _chart_theme(fig)
 
 
 def plot_allergen_summary(results):
@@ -992,7 +1251,7 @@ def plot_allergen_summary(results):
         margin=dict(l=10,r=10,t=40,b=10),
         xaxis_tickangle=-20
     )
-    return fig
+    return _chart_theme(fig)
 
 
 # ─────────────────────────────────────────────
@@ -1042,7 +1301,14 @@ def display_recipe_card(recipe, user_ings, servings=4,
                 badges.append(f"⏱️ {recipe['time_mins']} min")
             if recipe.get("source") == "hardcoded":
                 badges.append("🇨🇭 Bonus recipe")
+            if recipe.get("source") == "forkify":
+                badges.append("🌐 Forkify")
             st.markdown("  ".join(badges))
+            if recipe.get("source_url"):
+                st.markdown(
+                    f"[🔗 Full recipe & cooking steps (publisher site)]"
+                    f"({recipe['source_url']})"
+                )
 
             st.markdown(
                 f"{cov_color} **{coverage:.0f}% covered** "
@@ -1106,10 +1372,17 @@ def display_recipe_card(recipe, user_ings, servings=4,
 def main():
     init_db()
 
-    st.title("🍳 Smart Cookbook")
     st.markdown(
-        "Enter your ingredients → get matching recipes with "
-        "**quantities, allergens, nutrition** and **serving scaler**."
+        """
+<div class="cookbook-hero">
+<p style="font-size:1.85rem;font-weight:800;margin:0 0 0.4rem 0;color:#1b4332;">
+🍳 Smart Cookbook</p>
+<p style="margin:0;color:#1b4332;line-height:1.5;">
+<strong>TheMealDB</strong> + <strong>Forkify</strong> give a larger recipe pool.
+Match by what you have, see allergens, scale servings, and explore ML picks.</p>
+</div>
+""",
+        unsafe_allow_html=True,
     )
 
     # ── Sidebar ──
@@ -1141,8 +1414,8 @@ def main():
         min_coverage   = st.slider("Min coverage %", 0, 100, 30, 5)
         servings       = st.number_input("👨‍👩‍👧 Servings", 1, 12, 4, 1)
         include_bonus  = st.checkbox("Include Swiss/European recipes", True)
-
-
+        include_forkify = st.checkbox(
+            "Include Forkify (extra web recipes, a bit slower)", True)
 
         st.divider()
         st.header("⚠️ Allergen Filter")
@@ -1187,7 +1460,8 @@ def main():
 
     # ── Fetch and match ──
     with st.spinner("Searching recipes..."):
-        api_recipes  = fetch_recipes_for_ingredients(user_ingredients)
+        api_recipes  = fetch_recipes_for_ingredients(
+            user_ingredients, include_forkify=include_forkify)
         bonus        = get_bonus_recipes() if include_bonus else []
         all_recipes  = api_recipes + bonus
         matched_recipes, match_mode = cook_lab.resolve_recipes_nonempty(
