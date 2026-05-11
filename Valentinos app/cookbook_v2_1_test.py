@@ -36,7 +36,6 @@ import requests
 import sqlite3
 import pandas as pd
 import numpy as np
-import plotly.express as px
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import MultiLabelBinarizer
 
