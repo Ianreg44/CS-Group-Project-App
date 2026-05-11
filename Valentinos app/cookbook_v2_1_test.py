@@ -19,6 +19,7 @@ from ingredient names — no API needed, works offline.
 ML component:
 ━━━━━━━━━━━━
 - KNN similarity: find recipes similar to your favourites
+- TF–IDF + blended ranking (see ``cookbook_improvements_ml_lab.py``)
 - Coverage-based ranking: sort by % of ingredients you have
 - "1 ingredient away" detection
 
@@ -31,8 +32,17 @@ Hardcoded:
 AI Assistance: Developed with Claude (Anthropic), April 2026 | claude.ai
 """
 
-import streamlit as st
+import sqlite3
+
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import requests
+import streamlit as st
+from sklearn.neighbors import NearestNeighbors
+from sklearn.preprocessing import MultiLabelBinarizer
+
+import cookbook_improvements_ml_lab as cook_lab
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG
@@ -1180,10 +1190,19 @@ def main():
         api_recipes  = fetch_recipes_for_ingredients(user_ingredients)
         bonus        = get_bonus_recipes() if include_bonus else []
         all_recipes  = api_recipes + bonus
-        matched_recipes = match_recipes(
-            user_ingredients, all_recipes,
-            diet_filter, cuisine_filter, min_coverage
+        matched_recipes, match_mode = cook_lab.resolve_recipes_nonempty(
+            user_ingredients,
+            all_recipes,
+            diet_filter,
+            cuisine_filter,
+            float(min_coverage),
+            strict_match_fn=match_recipes,
         )
+        for r in matched_recipes:
+            r.setdefault(
+                "allergens",
+                detect_allergens(r.get("ingredients", [])),
+            )
 
     # Apply allergen exclusion filter
     if allergen_exclude:
@@ -1222,9 +1241,29 @@ def main():
         )
 
         if not matched_recipes:
-            st.warning("No recipes found. Try lowering coverage % or "
-                       "adding more ingredients.")
+            st.warning(
+                "No recipes found. Enable bonus recipes, add ingredients, "
+                "or check your connection to TheMealDB."
+            )
         else:
+            if match_mode != "strict":
+                labels = {
+                    "no_coverage_gate": (
+                        "Showing recipes without the minimum coverage filter "
+                        "(filters still apply). Lower coverage matches appear "
+                        "so you always get ideas."
+                    ),
+                    "widened_filters": (
+                        "Strict search was empty — diet and cuisine filters "
+                        "were widened to **All** so you still see recipes."
+                    ),
+                    "bare_minimum": (
+                        "Very few matches — showing the closest recipes we "
+                        "could find even if overlap is low."
+                    ),
+                }
+                st.info(labels.get(match_mode, "Relaxed search was used."))
+
             qs1,qs2,qs3,qs4 = st.columns(4)
             can_now = [r for r in matched_recipes if r["coverage"] >= 80]
             qs1.metric("Total matches",   len(matched_recipes))
@@ -1235,10 +1274,22 @@ def main():
 
             sort_by = st.radio(
                 "Sort by:",
-                ["Coverage","Fewest missing","Alphabetical"],
+                [
+                    "Coverage",
+                    "ML blend (TF–IDF)",
+                    "Fewest missing",
+                    "Alphabetical",
+                ],
                 horizontal=True
             )
-            if sort_by == "Fewest missing":
+            if sort_by == "ML blend (TF–IDF)" and matched_recipes:
+                retrieval = cook_lab.IngredientRetrievalModel.fit(
+                    matched_recipes
+                )
+                matched_recipes = cook_lab.rank_recipes_ml_blend(
+                    user_ingredients, matched_recipes, retrieval
+                )
+            elif sort_by == "Fewest missing":
                 matched_recipes = sorted(
                     matched_recipes, key=lambda x: x["missing_count"])
             elif sort_by == "Alphabetical":
@@ -1376,6 +1427,36 @@ def main():
         favourites' average vector. No manual rules — pure
         ingredient similarity.
         """)
+
+        st.subheader("TF–IDF retrieval & topics")
+        st.markdown(
+            "We also use **TF–IDF** (term frequency–inverse document frequency) "
+            "on ingredient text: a classic ML representation for “which "
+            "recipe talks about the same ingredients as your pantry?”"
+        )
+        if len(all_recipes) >= 2:
+            with st.spinner("Fitting TF–IDF / NMF..."):
+                retrieval = cook_lab.IngredientRetrievalModel.fit(all_recipes)
+                ranked = cook_lab.rank_recipes_ml_blend(
+                    user_ingredients, all_recipes[:20], retrieval
+                )
+            st.markdown("**Top matches by blended ML score** (on a sample):")
+            for r in ranked[:6]:
+                st.markdown(
+                    f"- **{r['name']}** — score `{r.get('ml_rank_score', 0)}` "
+                    f"(TF–IDF `{r.get('ml_tfidf', 0)}`, "
+                    f"coverage {r.get('coverage', 0):.0f}%)"
+                )
+            _, _, topics = cook_lab.nmf_ingredient_topics(
+                all_recipes[:40], n_topics=3
+            )
+            if topics:
+                st.markdown("**NMF ingredient topics** (unsupervised structure):")
+                for i, tlist in enumerate(topics):
+                    terms = ", ".join(f"{w}" for w, _s in tlist[:6])
+                    st.caption(f"Topic {i + 1}: {terms}")
+        else:
+            st.caption("Need at least two recipes in the pool for this panel.")
 
     # ── TAB 5: FAVOURITES ──
     with tab_favs:
