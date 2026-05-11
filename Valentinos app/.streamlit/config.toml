@@ -1,0 +1,10 @@
+# Green-on-white theme for Smart Cookbook (Streamlit native widgets).
+[theme]
+primaryColor = "#2d6a4f"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4fbf6"
+textColor = "#1b4332"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
