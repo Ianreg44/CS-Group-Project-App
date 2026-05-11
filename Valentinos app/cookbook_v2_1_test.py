@@ -5,12 +5,12 @@ Enter the ingredients you have at home and discover
 what you can cook — with quantities, nutrition info,
 allergen warnings, serving scaler and more.
 
-APIs (all free, no keys):
-━━━━━━━━━━━━━━━━━━━━━━
-1. TheMealDB → recipes by ingredient, quantities, instructions, photos
-   https://www.themealdb.com/api/json/v1/1/
-2. Forkify   → extra recipe pool (search + ingredient lists; full steps on
-   source link) https://forkify-api.jonas.io/api/v2/recipes
+APIs:
+━━━━━
+1. TheMealDB — free, no key (recipes by ingredient).
+2. Spoonacular — structured ingredients & instructions (needs
+   ``SPOONACULAR_API_KEY`` in the environment or ``.streamlit/secrets.toml``).
+3. Forkify — optional extra pool, no key (ingredient text can be messy).
 
 
 Allergen detection:
@@ -34,6 +34,9 @@ Hardcoded:
 AI Assistance: Developed with Claude (Anthropic), April 2026 | claude.ai
 """
 
+import hashlib
+import os
+import re
 import sqlite3
 
 import pandas as pd
@@ -66,8 +69,13 @@ st.markdown(
         background: #ffffff;
         color: #1b4332;
     }
+    /* Remove default Streamlit top gradient so the toolbar is not “doubled” */
+    [data-testid="stDecoration"],
+    div[data-testid="stDecoration"] {
+        display: none !important;
+    }
     [data-testid="stHeader"] {
-        background: rgba(255,255,255,0.92);
+        background: #ffffff;
         border-bottom: 1px solid #b7e4c7;
     }
     section[data-testid="stSidebar"] {
@@ -842,6 +850,207 @@ def fetch_forkify_for_ingredients(user_ingredients, max_detail: int = 20):
 
 
 # ─────────────────────────────────────────────
+# SPOONACULAR API (structured ingredients — needs API key)
+# Sign up: https://spoonacular.com/food-api
+# Set SPOONACULAR_API_KEY in the environment or Streamlit secrets.
+# ─────────────────────────────────────────────
+
+SPOONACULAR_BASE = "https://api.spoonacular.com"
+
+
+def spoonacular_api_key() -> str:
+    """Read key from env (local/CI) or Streamlit secrets (Cloud)."""
+    k = os.environ.get("SPOONACULAR_API_KEY", "").strip()
+    if k:
+        return k
+    try:
+        return str(st.secrets.get("SPOONACULAR_API_KEY", "")).strip()
+    except (FileNotFoundError, KeyError, AttributeError, RuntimeError):
+        return ""
+
+
+def spoonacular_key_fingerprint() -> str:
+    """Non-secret cache key fragment so empty responses are not cached forever."""
+    k = spoonacular_api_key()
+    if not k:
+        return ""
+    return hashlib.sha256(k.encode("utf-8")).hexdigest()[:16]
+
+
+def _strip_html_basic(html: str) -> str:
+    if not html:
+        return ""
+    t = re.sub(r"(?is)<script.*?>.*?</script>", "", html)
+    t = re.sub(r"<[^>]+>", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+@st.cache_data(ttl=86400)
+def spoonacular_find_by_ingredients(
+        ingredients_csv: str, number: int, key_fp: str):
+    """
+    One call: recipes ranked by how well they use the listed ingredients.
+    ``key_fp`` must be ``spoonacular_key_fingerprint()`` so cache invalidates
+    when a key is added or rotated.
+    """
+    api_key = spoonacular_api_key()
+    if not key_fp or not api_key or not ingredients_csv.strip():
+        return []
+    try:
+        r = requests.get(
+            f"{SPOONACULAR_BASE}/recipes/findByIngredients",
+            params={
+                "ingredients": ingredients_csv,
+                "number": number,
+                "ranking": 2,
+                "ignorePantry": "true",
+                "apiKey": api_key,
+            },
+            timeout=20,
+        )
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=86400)
+def spoonacular_information_bulk(ids_key: str, key_fp: str):
+    """
+    ``ids_key``: comma-separated ids. ``key_fp``: same as findByIngredients.
+    """
+    api_key = spoonacular_api_key()
+    if not key_fp or not api_key or not ids_key.strip():
+        return []
+    try:
+        r = requests.get(
+            f"{SPOONACULAR_BASE}/recipes/informationBulk",
+            params={
+                "ids": ids_key,
+                "includeNutrition": "false",
+                "apiKey": api_key,
+            },
+            timeout=25,
+        )
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def spoonacular_info_to_recipe(info: dict) -> dict:
+    """Normalize Spoonacular recipe JSON to the in-app recipe shape."""
+    sid = info.get("id")
+    ings: list[str] = []
+    msrs: list[str] = []
+    for ing in info.get("extendedIngredients") or []:
+        name = (ing.get("nameClean") or ing.get("name") or "").strip()
+        if not name:
+            continue
+        orig = (ing.get("original") or "").strip()
+        if not orig:
+            amt, unit = ing.get("amount"), (ing.get("unit") or "").strip()
+            parts = []
+            if amt is not None and str(amt).strip() != "":
+                parts.append(str(amt).strip())
+            if unit:
+                parts.append(unit)
+            orig = " ".join(parts) if parts else "as needed"
+        ings.append(name.lower())
+        msrs.append(orig)
+
+    raw_html = info.get("instructions") or ""
+    instructions = _strip_html_basic(raw_html)
+    if not instructions and info.get("summary"):
+        instructions = _strip_html_basic(info.get("summary", ""))
+
+    cuisines = info.get("cuisines") or []
+    area = cuisines[0] if cuisines else "International"
+    dish = (info.get("dishTypes") or ["General"])[0]
+    src = (info.get("sourceUrl") or info.get("spoonacularSourceUrl") or "").strip()
+    title = info.get("title") or "Recipe"
+    img = (info.get("image") or "").strip()
+    mins = info.get("readyInMinutes")
+
+    return {
+        "source": "spoonacular",
+        "id": f"spn_{sid}",
+        "name": title,
+        "category": str(dish).title(),
+        "area": str(area).title(),
+        "instructions": instructions or "Open the source link for full steps.",
+        "image": img,
+        "tags": ",".join(
+            x for x in ["spoonacular", *(c.lower() for c in cuisines)]
+            if x
+        ),
+        "ingredients": ings,
+        "measures": msrs,
+        "youtube": "",
+        "difficulty": "Medium",
+        "time_mins": int(mins) if mins is not None else None,
+        "source_url": src,
+    }
+
+
+def fetch_spoonacular_for_ingredients(
+        user_ingredients, enabled: bool, max_recipes: int = 12):
+    """
+    findByIngredients + informationBulk (two calls) for clean ingredient lines.
+    """
+    if not enabled or not spoonacular_api_key():
+        return []
+    key_fp = spoonacular_key_fingerprint()
+    if not key_fp:
+        return []
+    csv = ",".join(
+        i.strip() for i in user_ingredients[:14] if i and str(i).strip()
+    )
+    if not csv:
+        return []
+    found = spoonacular_find_by_ingredients(csv, max_recipes, key_fp)
+    if not found:
+        return []
+    found_trim = found[:max_recipes]
+    id_list: list[int] = []
+    for r in found_trim:
+        rid = r.get("id")
+        if rid is None:
+            continue
+        try:
+            id_list.append(int(rid))
+        except (TypeError, ValueError):
+            continue
+    if not id_list:
+        return []
+    ids_key = ",".join(str(i) for i in id_list)
+    details = spoonacular_information_bulk(ids_key, key_fp)
+    by_id = {d.get("id"): d for d in details if isinstance(d, dict)}
+    out: list[dict] = []
+    seen: set[int] = set()
+    for row in found_trim:
+        rid = row.get("id")
+        if rid is None:
+            continue
+        try:
+            rid_int = int(rid)
+        except (TypeError, ValueError):
+            continue
+        if rid_int in seen:
+            continue
+        info = by_id.get(rid_int)
+        if not info:
+            continue
+        seen.add(rid_int)
+        out.append(spoonacular_info_to_recipe(info))
+    return out
+
+
+# ─────────────────────────────────────────────
 # ALLERGEN DETECTION
 # Rule-based scan of ingredient names against
 # EU 14 mandatory allergen keyword list.
@@ -869,11 +1078,13 @@ def detect_allergens(ingredients):
 # ─────────────────────────────────────────────
 
 def fetch_recipes_for_ingredients(
-        user_ingredients, include_forkify: bool = True):
+        user_ingredients,
+        include_forkify: bool = True,
+        include_spoonacular: bool = True,
+):
     """
-    For each ingredient, fetch meals from TheMealDB (cache in SQLite).
-    Optionally merge Forkify search results for a larger recipe pool.
-    Returns unified list of recipe dicts with ingredients + measures.
+    TheMealDB (SQLite cache) + optional Spoonacular (structured ingredients,
+    needs API key) + optional Forkify. Unified recipe dicts.
     """
     seen_ids = set()
     full_meals = []
@@ -932,6 +1143,11 @@ def fetch_recipes_for_ingredients(
                         "youtube": meal.get("strYoutube",""),
                         "difficulty": "Medium", "time_mins": None,
                     })
+    full_meals.extend(
+        fetch_spoonacular_for_ingredients(
+            user_ingredients, enabled=include_spoonacular
+        )
+    )
     if include_forkify:
         full_meals.extend(fetch_forkify_for_ingredients(user_ingredients))
     return full_meals
@@ -1303,6 +1519,8 @@ def display_recipe_card(recipe, user_ings, servings=4,
                 badges.append("🇨🇭 Bonus recipe")
             if recipe.get("source") == "forkify":
                 badges.append("🌐 Forkify")
+            if recipe.get("source") == "spoonacular":
+                badges.append("🥄 Spoonacular")
             st.markdown("  ".join(badges))
             if recipe.get("source_url"):
                 st.markdown(
@@ -1378,8 +1596,9 @@ def main():
 <p style="font-size:1.85rem;font-weight:800;margin:0 0 0.4rem 0;color:#1b4332;">
 🍳 Smart Cookbook</p>
 <p style="margin:0;color:#1b4332;line-height:1.5;">
-<strong>TheMealDB</strong> + <strong>Forkify</strong> give a larger recipe pool.
-Match by what you have, see allergens, scale servings, and explore ML picks.</p>
+<strong>TheMealDB</strong> + optional <strong>Spoonacular</strong> (API key) +
+optional <strong>Forkify</strong>. Match by what you have, scale servings,
+allergens, and ML picks.</p>
 </div>
 """,
         unsafe_allow_html=True,
@@ -1414,6 +1633,16 @@ Match by what you have, see allergens, scale servings, and explore ML picks.</p>
         min_coverage   = st.slider("Min coverage %", 0, 100, 30, 5)
         servings       = st.number_input("👨‍👩‍👧 Servings", 1, 12, 4, 1)
         include_bonus  = st.checkbox("Include Swiss/European recipes", True)
+        _sp_key = bool(spoonacular_api_key())
+        include_spoonacular = st.checkbox(
+            "Include Spoonacular (structured ingredients; needs API key)",
+            value=_sp_key,
+        )
+        if not _sp_key:
+            st.caption(
+                "Set **SPOONACULAR_API_KEY** in the environment or "
+                "`.streamlit/secrets.toml` to enable Spoonacular."
+            )
         include_forkify = st.checkbox(
             "Include Forkify (extra web recipes, a bit slower)", True)
 
@@ -1461,7 +1690,10 @@ Match by what you have, see allergens, scale servings, and explore ML picks.</p>
     # ── Fetch and match ──
     with st.spinner("Searching recipes..."):
         api_recipes  = fetch_recipes_for_ingredients(
-            user_ingredients, include_forkify=include_forkify)
+            user_ingredients,
+            include_forkify=include_forkify,
+            include_spoonacular=include_spoonacular and _sp_key,
+        )
         bonus        = get_bonus_recipes() if include_bonus else []
         all_recipes  = api_recipes + bonus
         matched_recipes, match_mode = cook_lab.resolve_recipes_nonempty(
