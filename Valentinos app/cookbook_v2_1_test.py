@@ -33,11 +33,6 @@ AI Assistance: Developed with Claude (Anthropic), April 2026 | claude.ai
 
 import streamlit as st
 import requests
-import sqlite3
-import pandas as pd
-import numpy as np
-from sklearn.neighbors import NearestNeighbors
-from sklearn.preprocessing import MultiLabelBinarizer
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG
