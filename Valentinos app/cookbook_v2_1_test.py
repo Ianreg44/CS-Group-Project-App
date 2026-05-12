@@ -1080,6 +1080,86 @@ def detect_allergens(ingredients):
 # RECIPE FETCHING AND MATCHING
 # ─────────────────────────────────────────────
 
+# TheMealDB: widen discovery so the list is not mostly bonus recipes after sort.
+MEALDB_FILTER_INGREDIENTS = 10
+MEALDB_FILTER_CAP = 10
+MEALDB_SEARCH_INGREDIENTS = 8
+MEALDB_SEARCH_CAP = 5
+
+
+def _add_mealdb_recipe(
+        meal_id: str,
+        seen_ids: set,
+        full_meals: list,
+        cached_df,
+        cached_ids: set,
+) -> None:
+    """Load one TheMealDB meal by id into full_meals if new."""
+    if not meal_id or meal_id in seen_ids:
+        return
+    seen_ids.add(meal_id)
+
+    if meal_id in cached_ids:
+        row = cached_df[cached_df["meal_id"] == meal_id].iloc[0]
+        ings = row["ingredients"].split("|") \
+            if row["ingredients"] else []
+        msrs = row["measures"].split("|") \
+            if pd.notna(row["measures"]) and row["measures"] else []
+        full_meals.append({
+            "source": "api", "id": meal_id,
+            "name":   row["name"],
+            "category": str(row["category"] or ""),
+            "area":   str(row["area"] or ""),
+            "instructions": row["instructions"],
+            "image":  row["image_url"],
+            "tags":   str(row["tags"] or ""),
+            "ingredients": ings,
+            "measures":    msrs,
+            "youtube": row["youtube_url"],
+            "difficulty": "Medium", "time_mins": None,
+        })
+        return
+
+    meal = api_lookup_by_id(meal_id)
+    if not meal:
+        return
+    save_api_recipe(meal)
+    ings, msrs = [], []
+    for i in range(1, 21):
+        ing = (meal.get(f"strIngredient{i}") or "").strip()
+        msr = (meal.get(f"strMeasure{i}") or "").strip()
+        if ing:
+            ings.append(ing.lower())
+            msrs.append(msr)
+    full_meals.append({
+        "source": "api", "id": meal_id,
+        "name":   meal["strMeal"],
+        "category": str(meal.get("strCategory") or ""),
+        "area":   str(meal.get("strArea") or ""),
+        "instructions": meal.get("strInstructions", ""),
+        "image":  meal.get("strMealThumb", ""),
+        "tags":   str(meal.get("strTags") or ""),
+        "ingredients": ings,
+        "measures":    msrs,
+        "youtube": meal.get("strYoutube", ""),
+        "difficulty": "Medium", "time_mins": None,
+    })
+
+
+def recipe_source_rank(recipe: dict) -> int:
+    """
+    Sort tie-break: prefer API / Spoonacular / Forkify before hardcoded bonus
+    when ingredient match % and missing count are equal.
+    """
+    s = (recipe.get("source") or "api").lower()
+    return {
+        "spoonacular": 0,
+        "api": 1,
+        "forkify": 2,
+        "hardcoded": 3,
+    }.get(s, 1)
+
+
 def fetch_recipes_for_ingredients(
         user_ingredients,
         include_forkify: bool = True,
@@ -1095,57 +1175,24 @@ def fetch_recipes_for_ingredients(
     cached_ids = set(cached_df["meal_id"].tolist()) \
         if not cached_df.empty else set()
 
-    for ingredient in user_ingredients[:6]:
+    # By-ingredient filter (TheMealDB): many meals per pantry item.
+    for ingredient in user_ingredients[:MEALDB_FILTER_INGREDIENTS]:
         matches = api_filter_by_ingredient(ingredient.strip())
-        for m in matches[:5]:
-            meal_id = m["idMeal"]
-            if meal_id in seen_ids:
-                continue
-            seen_ids.add(meal_id)
+        for m in matches[:MEALDB_FILTER_CAP]:
+            mid = m.get("idMeal")
+            if mid:
+                _add_mealdb_recipe(
+                    mid, seen_ids, full_meals, cached_df, cached_ids)
 
-            if meal_id in cached_ids:
-                row = cached_df[cached_df["meal_id"] == meal_id].iloc[0]
-                ings = row["ingredients"].split("|") \
-                    if row["ingredients"] else []
-                msrs = row["measures"].split("|") \
-                    if pd.notna(row["measures"]) and row["measures"] else []
-                full_meals.append({
-                    "source": "api", "id": meal_id,
-                    "name":   row["name"],
-                    "category": str(row["category"] or ""),
-                    "area":   str(row["area"] or ""),
-                    "instructions": row["instructions"],
-                    "image":  row["image_url"],
-                    "tags":   str(row["tags"] or ""),
-                    "ingredients": ings,
-                    "measures":    msrs,
-                    "youtube": row["youtube_url"],
-                    "difficulty": "Medium", "time_mins": None,
-                })
-            else:
-                meal = api_lookup_by_id(meal_id)
-                if meal:
-                    save_api_recipe(meal)
-                    ings, msrs = [], []
-                    for i in range(1, 21):
-                        ing = (meal.get(f"strIngredient{i}") or "").strip()
-                        msr = (meal.get(f"strMeasure{i}") or "").strip()
-                        if ing:
-                            ings.append(ing.lower())
-                            msrs.append(msr)
-                    full_meals.append({
-                        "source": "api", "id": meal_id,
-                        "name":   meal["strMeal"],
-                        "category": str(meal.get("strCategory") or ""),
-                        "area":   str(meal.get("strArea") or ""),
-                        "instructions": meal.get("strInstructions",""),
-                        "image":  meal.get("strMealThumb",""),
-                        "tags":   str(meal.get("strTags") or ""),
-                        "ingredients": ings,
-                        "measures":    msrs,
-                        "youtube": meal.get("strYoutube",""),
-                        "difficulty": "Medium", "time_mins": None,
-                    })
+    # Name search: adds recipes whose titles mention the ingredient (extra variety).
+    for ingredient in user_ingredients[:MEALDB_SEARCH_INGREDIENTS]:
+        meals = api_search_by_name(ingredient.strip()) or []
+        for m in meals[:MEALDB_SEARCH_CAP]:
+            mid = m.get("idMeal")
+            if mid:
+                _add_mealdb_recipe(
+                    mid, seen_ids, full_meals, cached_df, cached_ids)
+
     full_meals.extend(
         fetch_spoonacular_for_ingredients(
             user_ingredients, enabled=include_spoonacular
@@ -1233,7 +1280,13 @@ def match_recipes(user_ingredients, all_recipes,
             "allergens":     allergens,
         })
 
-    results.sort(key=lambda x: (-x["coverage"], x["missing_count"]))
+    results.sort(
+        key=lambda x: (
+            -x["coverage"],
+            x["missing_count"],
+            recipe_source_rank(x),
+        )
+    )
     return results
 
 
@@ -1755,7 +1808,7 @@ Sorted by <strong>ingredient match %</strong>; optional filter for weak matches.
         user_ingredients, all_recipes, diet_filter, cuisine_filter, 0)
     one_away = sorted(
         [r for r in _full_pool if r["missing_count"] == 1],
-        key=lambda x: (-x["coverage"], x["name"]),
+        key=lambda x: (-x["coverage"], recipe_source_rank(x), x["name"]),
     )[:15]
 
     # ── Tabs ──
@@ -1788,7 +1841,10 @@ Sorted by <strong>ingredient match %</strong>; optional filter for weak matches.
             if not hide_weak_matches:
                 st.caption(
                     "Recipes are **sorted by ingredient match %** (best first). "
-                    "Use the sidebar to hide weak matches if the list is long."
+                    "TheMealDB pulls many meals per ingredient plus name search, "
+                    "so the list is not only the small Swiss/European bonus set. "
+                    "Bonus recipes sit lower when their overlap with your pantry "
+                    "is weaker — turn off bonus in the sidebar if you want APIs only."
                 )
             if match_mode != "strict":
                 labels = {
@@ -1830,7 +1886,11 @@ Sorted by <strong>ingredient match %</strong>; optional filter for weak matches.
             if sort_by == "Ingredient match %":
                 matched_recipes = sorted(
                     matched_recipes,
-                    key=lambda x: (-x["coverage"], x["missing_count"]),
+                    key=lambda x: (
+                        -x["coverage"],
+                        x["missing_count"],
+                        recipe_source_rank(x),
+                    ),
                 )
             elif sort_by == "ML blend (TF–IDF)" and matched_recipes:
                 retrieval = cook_lab.IngredientRetrievalModel.fit(
@@ -1841,7 +1901,13 @@ Sorted by <strong>ingredient match %</strong>; optional filter for weak matches.
                 )
             elif sort_by == "Fewest missing":
                 matched_recipes = sorted(
-                    matched_recipes, key=lambda x: x["missing_count"])
+                    matched_recipes,
+                    key=lambda x: (
+                        x["missing_count"],
+                        -x["coverage"],
+                        recipe_source_rank(x),
+                    ),
+                )
             elif sort_by == "Alphabetical":
                 matched_recipes = sorted(
                     matched_recipes, key=lambda x: x["name"])

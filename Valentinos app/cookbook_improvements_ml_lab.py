@@ -122,6 +122,17 @@ def _cuisine_ok(cuisine_filter: str, recipe: dict[str, Any]) -> bool:
     return cuisine_filter.lower() in area
 
 
+def _source_rank_for_sort(recipe: dict[str, Any]) -> int:
+    """Tie-break: defer hardcoded bonus when match scores tie (mirrors app)."""
+    s = (recipe.get("source") or "api").lower()
+    return {
+        "spoonacular": 0,
+        "api": 1,
+        "forkify": 2,
+        "hardcoded": 3,
+    }.get(s, 1)
+
+
 def match_recipes_no_coverage_filter(
     user_ingredients: list[str],
     all_recipes: list[dict[str, Any]],
@@ -151,7 +162,13 @@ def match_recipes_no_coverage_filter(
             "missing_count": len(missing),
         }
         results.append(row)
-    results.sort(key=lambda x: (-x["coverage"], x["missing_count"]))
+    results.sort(
+        key=lambda x: (
+            -x["coverage"],
+            x["missing_count"],
+            _source_rank_for_sort(x),
+        )
+    )
     return results
 
 
@@ -213,7 +230,13 @@ def resolve_recipes_nonempty(
                 "missing_count": len(mis),
             }
         )
-    bare.sort(key=lambda x: (-x["coverage"], x["missing_count"]))
+    bare.sort(
+        key=lambda x: (
+            -x["coverage"],
+            x["missing_count"],
+            _source_rank_for_sort(x),
+        )
+    )
     return bare, "bare_minimum"
 
 
@@ -431,7 +454,13 @@ def match_recipes_strict_gate(
                 "missing_count": len(missing),
             }
         )
-    results.sort(key=lambda x: (-x["coverage"], x["missing_count"]))
+    results.sort(
+        key=lambda x: (
+            -x["coverage"],
+            x["missing_count"],
+            _source_rank_for_sort(x),
+        )
+    )
     return results
 
 
