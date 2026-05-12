@@ -5,13 +5,16 @@ Enter the ingredients you have at home and discover
 what you can cook — with quantities, nutrition info,
 allergen warnings, serving scaler and more.
 
-APIs:
-━━━━━
-1. TheMealDB — free, no key (recipes by ingredient).
-2. Spoonacular — structured ingredients & instructions (needs
-   ``SPOONACULAR_API_KEY`` in the environment or ``.streamlit/secrets.toml``).
-3. Forkify — optional extra pool, no key (ingredient text can be messy).
+Data sources (combined for breadth + structure):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• **TheMealDB** — free public API, no key; meals filtered by ingredient.
+• **Spoonacular** — optional; structured ingredient lines & instructions;
+  requires ``SPOONACULAR_API_KEY`` (environment or Streamlit secrets).
+• **Forkify** — optional second index, no key; link-out for full steps.
+• **Bonus recipes** — Swiss/European dishes embedded offline.
 
+Matching: each recipe shows **ingredient match %**; results default to
+**best overlap first**. Optional sidebar filter can hide weak matches.
 
 Allergen detection:
 ━━━━━━━━━━━━━━━━━━
@@ -22,7 +25,7 @@ ML component:
 ━━━━━━━━━━━━
 - KNN similarity: find recipes similar to your favourites
 - TF–IDF + blended ranking (see ``cookbook_improvements_ml_lab.py``)
-- Coverage-based ranking: sort by % of ingredients you have
+- Ingredient match % + optional minimum-match filter
 - "1 ingredient away" detection
 
 Hardcoded:
@@ -1183,11 +1186,11 @@ def compute_coverage(user_ings_set, recipe_ings):
 
 def match_recipes(user_ingredients, all_recipes,
                   diet_filter="All", cuisine_filter="All",
-                  min_coverage=20):
+                  min_coverage=0):
     """
     Match recipes to user ingredients.
-    Filter by diet and cuisine.
-    Return sorted list with coverage, matched, missing.
+    Filter by diet and cuisine; optional minimum coverage (default 0 = show all).
+    Results sorted by coverage (best matches first), then fewest missing.
     """
     user_set = set(i.strip().lower() for i in user_ingredients if i.strip())
     results  = []
@@ -1392,8 +1395,8 @@ def plot_coverage_bar(results):
         textposition="auto"
     ))
     fig.update_layout(
-        title="Ingredient coverage — top matches",
-        xaxis=dict(range=[0,100], title="% ingredients you have"),
+        title="Ingredient match % — top recipes",
+        xaxis=dict(range=[0,100], title="% of recipe ingredients you have"),
         height=max(300, len(top)*28),
         margin=dict(l=10,r=10,t=40,b=10),
         yaxis=dict(autorange="reversed")
@@ -1529,8 +1532,8 @@ def display_recipe_card(recipe, user_ings, servings=4,
                 )
 
             st.markdown(
-                f"{cov_color} **{coverage:.0f}% covered** "
-                f"({len(matched)}/{len(matched)+len(missing)} ingredients)"
+                f"{cov_color} **{coverage:.0f}% ingredient match** "
+                f"({len(matched)}/{len(matched)+len(missing)} recipe ingredients)"
             )
 
             # Matched
@@ -1596,9 +1599,9 @@ def main():
 <p style="font-size:1.85rem;font-weight:800;margin:0 0 0.4rem 0;color:#1b4332;">
 🍳 Smart Cookbook</p>
 <p style="margin:0;color:#1b4332;line-height:1.5;">
-<strong>TheMealDB</strong> + optional <strong>Spoonacular</strong> (API key) +
-optional <strong>Forkify</strong>. Match by what you have, scale servings,
-allergens, and ML picks.</p>
+<strong>TheMealDB</strong> (always) · optional <strong>Spoonacular</strong>
+(API key) · optional <strong>Forkify</strong> · Swiss/European bonus recipes.
+Sorted by <strong>ingredient match %</strong>; optional filter for weak matches.</p>
 </div>
 """,
         unsafe_allow_html=True,
@@ -1630,7 +1633,24 @@ allergens, and ML picks.</p>
         cuisine_filter = st.selectbox("Cuisine", [
             "All","Italian","French","Spanish","Swiss",
             "Asian","American","British","Mexican","Mediterranean"])
-        min_coverage   = st.slider("Min coverage %", 0, 100, 30, 5)
+        st.markdown("**Ingredient match**")
+        hide_weak_matches = st.checkbox(
+            "Hide recipes below a minimum match %",
+            value=False,
+            help=(
+                "When off (default), every recipe is shown, sorted with the "
+                "best overlap first. Turn on to drop weak matches."
+            ),
+        )
+        min_match_pct = st.slider(
+            "Minimum match % (only if hiding weak matches)",
+            min_value=5,
+            max_value=100,
+            value=30,
+            step=5,
+            disabled=not hide_weak_matches,
+        )
+        effective_min_coverage = float(min_match_pct if hide_weak_matches else 0)
         servings       = st.number_input("👨‍👩‍👧 Servings", 1, 12, 4, 1)
         include_bonus  = st.checkbox("Include Swiss/European recipes", True)
         _sp_key = bool(spoonacular_api_key())
@@ -1645,6 +1665,15 @@ allergens, and ML picks.</p>
             )
         include_forkify = st.checkbox(
             "Include Forkify (extra web recipes, a bit slower)", True)
+
+        with st.expander("ℹ️ Where recipes come from"):
+            st.markdown(
+                "**TheMealDB** — always used (no API key).  \n"
+                "**Spoonacular** — optional; best structured ingredients "
+                "(needs `SPOONACULAR_API_KEY`).  \n"
+                "**Forkify** — optional extra variety (no key).  \n"
+                "**Bonus** — Swiss/European recipes built into the app."
+            )
 
         st.divider()
         st.header("⚠️ Allergen Filter")
@@ -1701,7 +1730,7 @@ allergens, and ML picks.</p>
             all_recipes,
             diet_filter,
             cuisine_filter,
-            float(min_coverage),
+            effective_min_coverage,
             strict_match_fn=match_recipes,
         )
         for r in matched_recipes:
@@ -1721,10 +1750,13 @@ allergens, and ML picks.</p>
     top_name = matched_recipes[0]["name"] if matched_recipes else "None"
     log_search(user_ingredients, diet_filter, len(matched_recipes), top_name)
 
-    # ── Find "1 ingredient away" recipes ──
-    one_away = [r for r in match_recipes(
+    # ── "1 ingredient away" from full pool (same ids can appear in main list too)
+    _full_pool = match_recipes(
         user_ingredients, all_recipes, diet_filter, cuisine_filter, 0)
-        if r["missing_count"] == 1 and r not in matched_recipes]
+    one_away = sorted(
+        [r for r in _full_pool if r["missing_count"] == 1],
+        key=lambda x: (-x["coverage"], x["name"]),
+    )[:15]
 
     # ── Tabs ──
     (tab_results, tab_one_away, tab_analytics,
@@ -1748,16 +1780,22 @@ allergens, and ML picks.</p>
 
         if not matched_recipes:
             st.warning(
-                "No recipes found. Enable bonus recipes, add ingredients, "
-                "or check your connection to TheMealDB."
+                "No recipes found. Try more ingredients, disable "
+                "**Hide recipes below…**, enable Swiss/European bonus recipes, "
+                "turn on Spoonacular/Forkify if configured, or check your network."
             )
         else:
+            if not hide_weak_matches:
+                st.caption(
+                    "Recipes are **sorted by ingredient match %** (best first). "
+                    "Use the sidebar to hide weak matches if the list is long."
+                )
             if match_mode != "strict":
                 labels = {
                     "no_coverage_gate": (
-                        "Showing recipes without the minimum coverage filter "
-                        "(filters still apply). Lower coverage matches appear "
-                        "so you always get ideas."
+                        "Your minimum match filter excluded everything — showing "
+                        "recipes anyway (best overlap first). Turn off "
+                        "**Hide recipes below…** or lower the threshold."
                     ),
                     "widened_filters": (
                         "Strict search was empty — diet and cuisine filters "
@@ -1774,21 +1812,27 @@ allergens, and ML picks.</p>
             can_now = [r for r in matched_recipes if r["coverage"] >= 80]
             qs1.metric("Total matches",   len(matched_recipes))
             qs2.metric("Can make NOW 🟢", len(can_now))
-            qs3.metric("Best coverage",
+            qs3.metric("Best ingredient match",
                        f"{matched_recipes[0]['coverage']:.0f}%")
             qs4.metric("Your ingredients", len(user_ingredients))
 
             sort_by = st.radio(
-                "Sort by:",
+                "Sort results by:",
                 [
-                    "Coverage",
+                    "Ingredient match %",
                     "ML blend (TF–IDF)",
                     "Fewest missing",
                     "Alphabetical",
                 ],
-                horizontal=True
+                horizontal=True,
+                help="Default order is already best ingredient overlap first.",
             )
-            if sort_by == "ML blend (TF–IDF)" and matched_recipes:
+            if sort_by == "Ingredient match %":
+                matched_recipes = sorted(
+                    matched_recipes,
+                    key=lambda x: (-x["coverage"], x["missing_count"]),
+                )
+            elif sort_by == "ML blend (TF–IDF)" and matched_recipes:
                 retrieval = cook_lab.IngredientRetrievalModel.fit(
                     matched_recipes
                 )
@@ -1823,7 +1867,7 @@ allergens, and ML picks.</p>
                 st.markdown(
                     f"**{recipe['name']}** — just need: "
                     f"**{missing_ing}** | "
-                    f"Coverage: {recipe['coverage']:.0f}%"
+                    f"Match: {recipe['coverage']:.0f}%"
                 )
                 display_recipe_card(
                     recipe, user_ingredients, servings,
